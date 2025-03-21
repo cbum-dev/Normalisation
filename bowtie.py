@@ -1,16 +1,25 @@
-import json
+import bowtie
+from jsonschema import validate, ValidationError
 
-# Define the schema and instances
-schema = {"type": "integer"}
-valid_instance = 37
-invalid_instance = "foo"
+def validate_equivalence(original_schema, normalized_schema, test_instances):
+    original_valid = all(validate_schema(original_schema, instance) for instance in test_instances)
+    normalized_valid = all(validate_schema(normalized_schema, instance) for instance in test_instances)
+    
+    assert original_valid == normalized_valid, "Validation result mismatch between original and normalized schema"
 
-# Function to write JSON to a file
-def write_json(data, filename):
-    with open(filename, 'w') as file:
-        json.dump(data, file)
+    return original_valid, normalized_valid
 
-# Create the files
-write_json(schema, 'schema.json')
-write_json(valid_instance, 'instance.json')
-write_json(invalid_instance, 'invalid_instance.json')
+def validate_schema(schema, instance):
+    try:
+        validate(instance, schema)
+        return True
+    except ValidationError:
+        return False
+
+# Example usage
+original_schema = {"oneOf": [{"const": "foo"}, {"const": "bar"}]}
+normalized_schema = {"enum": ["foo", "bar"]}
+test_instances = ["foo", "bar", "baz", 42]
+print(
+validate_equivalence(original_schema, normalized_schema, test_instances)
+)

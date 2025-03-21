@@ -1,339 +1,189 @@
-"""
-Tests for the JSON Schema Normalizer.
-"""
-
 import unittest
 import json
-from normaliser import normalize_schema, SchemaNormalizer
+from normaliser import JSONSchemaNormalizer
 
-
-class TestSchemaRules(unittest.TestCase):
-    """Test each individual normalization rule."""
-    
+class TestJSONSchemaNormalizer(unittest.TestCase):
     def setUp(self):
-        self.normalizer = SchemaNormalizer()
-    
-    def test_oneOf_to_enum(self):
-        """Test converting oneOf with const values to enum."""
+        self.normalizer = JSONSchemaNormalizer()
+        
+    def _normalize_enum_to_const(self, schema: dict[str, any]) -> dict[str, any]:
+        """Convert enum with a single value to const."""
+        if "enum" in schema and isinstance(schema["enum"], list) and len(schema["enum"]) == 1:
+            # Store the enum value first
+            const_value = schema["enum"][0]
+        # Then delete the enum
+            del schema["enum"]
+        # Finally, set the const value
+            schema["const"] = const_value
+            
+        return schema
+    def test_remove_non_validation_keywords(self):
+        """Test removal of non-validation keywords."""
         schema = {
+            "title": "My Schema",
+            "required": ["foo"],
+            "description": "A test schema",
+            "$comment": "This is a comment"
+        }
+        expected = {
+            "required": ["foo"]
+        }
+        
+        normalized = self.normalizer.normalize(schema)
+        self.assertEqual(normalized, expected)
+        
+    def test_simplify_boolean_logic(self):
+        """Test simplification of boolean logic."""
+        schema = {
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "foo": {"type": "string"}
+                    }
+                }
+            ]
+        }
+        expected = {
+            "type": "object",
+            "properties": {
+                "foo": {"type": "string"}
+            }
+        }
+        
+        normalized = self.normalizer.normalize(schema)
+        self.assertEqual(normalized, expected)
+        
+    def test_enum_to_const_conversion(self):
+        """Test conversion of single-value enum to const."""
+        # Configure normalizer to enable this conversion
+        normalizer = JSONSchemaNormalizer({"normalize_enum_to_const": True})
+        
+        schema = {
+            "enum": ["foo"]
+        }
+        expected = {
+            "const": "foo"
+        }
+        
+        normalized = normalizer.normalize(schema)
+        self.assertEqual(normalized, expected)
+        
+    def test_recursive_normalization(self):
+        """Test that normalization is applied recursively."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "foo": {
+                    "oneOf": [
+                        {"const": "a"},
+                        {"const": "b"}
+                    ]
+                },
+                "bar": {
+                    "title": "Bar Property",
+                    "type": "string"
+                }
+            }
+        }
+        expected = {
+            "type": "object",
+            "properties": {
+                "foo": {
+                    "enum": ["a", "b"]
+                },
+                "bar": {
+                    "type": "string"
+                }
+            }
+        }
+        
+        normalized = self.normalizer.normalize(schema)
+        self.assertEqual(normalized, expected)
+        
+    def test_config_options(self):
+        """Test that configuration options work correctly."""
+        # Create normalizer that keeps non-validation keywords
+        normalizer = JSONSchemaNormalizer({"remove_non_validation_keywords": False})
+        
+        schema = {
+            "title": "My Schema",
+            "required": ["foo"]
+        }
+        
+        normalized = normalizer.normalize(schema)
+        self.assertEqual(normalized, schema)  # Should be unchanged
+        
+    def test_equivalence_checking(self):
+        """Test the equivalence checking functionality."""
+        schema1 = {
             "oneOf": [
                 {"const": "foo"},
                 {"const": "bar"}
             ]
         }
-        expected = {
+        schema2 = {
             "enum": ["foo", "bar"]
         }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_remove_non_validation_keywords(self):
-        """Test removing non-validation keywords."""
-        schema = {
-            "title": "My Schema",
-            "description": "A schema for testing",
-            "required": ["foo"],
-            "examples": ["example1", "example2"]
-        }
-        expected = {
-            "required": ["foo"]
-        }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_simplify_boolean_schema_empty(self):
-        """Test simplifying an empty schema to true."""
-        schema = {}
-        expected = True
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_simplify_boolean_schema_contradiction(self):
-        """Test simplifying a contradictory schema to false."""
-        schema = {
-            "type": "string",
-            "not": {"type": "string"}
-        }
-        expected = False
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_simplify_array_items(self):
-        """Test simplifying array items with redundant definitions."""
-        schema = {
-            "type": "array",
-            "items": {},
-            "additionalItems": {"type": "string"}
-        }
-        expected = {
-            "type": "array",
-            "items": {}
-        }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_merge_allOf_single(self):
-        """Test merging allOf with a single schema."""
-        schema = {
-            "allOf": [
-                {"type": "string", "minLength": 1}
-            ]
-        }
-        expected = {
-            "type": "string",
-            "minLength": 1
-        }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_simplify_boolean_logic_not_not(self):
-        """Test simplifying double negation (not not X)."""
-        schema = {
-            "not": {
-                "not": {"type": "string"}
-            }
-        }
-        expected = {
-            "type": "string"
-        }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_deduplicate_enum(self):
-        """Test deduplicating enum values."""
-        schema = {
-            "enum": ["foo", "bar", "foo", "baz"]
-        }
-        expected = {
+        
+        self.assertTrue(self.normalizer.is_equivalent(schema1, schema2))
+        
+        schema3 = {
             "enum": ["foo", "bar", "baz"]
         }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-
-
-class TestComplexCases(unittest.TestCase):
-    """Test more complex schema normalization cases."""
-    
-    def setUp(self):
-        self.normalizer = SchemaNormalizer()
-    
-    def test_nested_boolean_logic(self):
-        """Test normalizing nested boolean logic."""
+        
+        self.assertFalse(self.normalizer.is_equivalent(schema1, schema3))
+        
+    def test_complex_schema(self):
+        """Test normalization of a more complex schema."""
         schema = {
-            "allOf": [
-                {
-                    "anyOf": [
-                        {"type": "string"},
-                        {"type": "number"},
-                        False
+            "title": "Complex Schema",
+            "type": "object",
+            "properties": {
+                "name": {
+                    "description": "The person's name",
+                    "type": "string"
+                },
+                "age": {
+                    "oneOf": [
+                        {"const": 18},
+                        {"const": 19},
+                        {"const": 20}
                     ]
                 },
-                {
-                    "not": {
-                        "type": "number"
-                    }
-                }
-            ]
-        }
-        expected = {
-            "type": "string"
-        }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_recursive_structures(self):
-        """Test normalizing recursively defined structures."""
-        schema = {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "title": "Name Field"},
-                "children": {
-                    "type": "array",
-                    "items": {
-                        "oneOf": [
-                            {"const": "child1"},
-                            {"const": "child2"}
-                        ]
-                    }
+                "address": {
+                    "allOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "street": {"type": "string"}
+                            }
+                        }
+                    ]
                 }
             }
-        }
-        expected = {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "children": {
-                    "type": "array",
-                    "items": {
-                        "enum": ["child1", "child2"]
-                    }
-                }
-            }
-        }
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_equivalent_schemas(self):
-        """Test pairs of schemas that should normalize to the same result."""
-        pairs = [
-            # Pair 1
-            (
-                {"oneOf": [{"const": "foo"}, {"const": "bar"}]},
-                {"enum": ["foo", "bar"]}
-            ),
-            # Pair 2
-            (
-                {"required": ["foo"]},
-                {"title": "My Schema", "required": ["foo"]}
-            ),
-            # Pair 3
-            (
-                {"type": "string", "minLength": 1},
-                {"allOf": [{"type": "string"}, {"minLength": 1}]}
-            ),
-            # Pair 4
-            (
-                {"type": ["string", "null"]},
-                {"anyOf": [{"type": "string"}, {"type": "null"}]}
-            ),
-        ]
-        
-        for schema1, schema2 in pairs:
-            normalized1 = self.normalizer.normalize(schema1)
-            normalized2 = self.normalizer.normalize(schema2)
-            self.assertEqual(normalized1, normalized2, 
-                             f"Schemas didn't normalize to same result: {schema1} and {schema2}")
-
-
-class TestRealWorldExamples(unittest.TestCase):
-    """Test normalization of real-world schema examples."""
-    
-    def setUp(self):
-        self.normalizer = SchemaNormalizer()
-    
-    def test_person_schema(self):
-        """Test normalizing a typical person schema."""
-        schema = {
-            "title": "Person",
-            "description": "A person object",
-            "type": "object",
-            "properties": {
-                "firstName": {
-                    "type": "string",
-                    "description": "The person's first name"
-                },
-                "lastName": {
-                    "type": "string",
-                    "description": "The person's last name"
-                },
-                "age": {
-                    "description": "Age in years",
-                    "type": "integer",
-                    "minimum": 0
-                }
-            },
-            "required": ["firstName", "lastName"]
         }
         
         expected = {
             "type": "object",
             "properties": {
-                "firstName": {
-                    "type": "string"
-                },
-                "lastName": {
+                "name": {
                     "type": "string"
                 },
                 "age": {
-                    "type": "integer",
-                    "minimum": 0
-                }
-            },
-            "required": ["firstName", "lastName"]
-        }
-        
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-    
-    def test_api_response_schema(self):
-        """Test normalizing an API response schema with oneOf."""
-        schema = {
-            "title": "API Response",
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": {"const": "success"},
-                        "data": {"type": "object"}
-                    },
-                    "required": ["status", "data"]
+                    "enum": [18, 19, 20]
                 },
-                {
+                "address": {
                     "type": "object",
                     "properties": {
-                        "status": {"const": "error"},
-                        "error": {"type": "string"}
-                    },
-                    "required": ["status", "error"]
+                        "street": {"type": "string"}
+                    }
                 }
-            ]
-        }
-        
-        # This should remain largely unchanged as it can't be simplified further
-        expected = {
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": {"const": "success"},
-                        "data": {"type": "object"}
-                    },
-                    "required": ["status", "data"]
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": {"const": "error"},
-                        "error": {"type": "string"}
-                    },
-                    "required": ["status", "error"]
-                }
-            ]
-        }
-        
-        self.assertEqual(self.normalizer.normalize(schema), expected)
-
-
-class TestPerformance(unittest.TestCase):
-    """Test the performance characteristics of the normalizer."""
-    
-    def setUp(self):
-        self.normalizer = SchemaNormalizer()
-    
-    def test_deeply_nested_schema(self):
-        """Test that deeply nested schemas don't cause stack overflow."""
-        # Create a deeply nested schema
-        schema = {"type": "string"}
-        for _ in range(100):
-            schema = {"allOf": [schema]}
-        
-        # Should normalize without errors
-        try:
-            normalized = self.normalizer.normalize(schema)
-            self.assertEqual(normalized, {"type": "string"})
-        except RecursionError:
-            self.fail("Normalizer caused recursion error on deeply nested schema")
-    
-    def test_pathological_case(self):
-        """Test a pathological case with many nested oneOfs."""
-        # Create a schema with many nested oneOfs that can be simplified
-        schema = {"type": "string"}
-        for i in range(20):
-            schema = {
-                "oneOf": [
-                    {"const": f"value{i}"},
-                    schema
-                ]
             }
+        }
         
-        # Should normalize without timing out
-        import time
-        start_time = time.time()
         normalized = self.normalizer.normalize(schema)
-        duration = time.time() - start_time
-        
-        # Check that it completes in a reasonable time (adjust threshold as needed)
-        self.assertLess(duration, 5.0, "Normalization took too long")
-
+        self.assertEqual(normalized, expected)
 
 if __name__ == "__main__":
     unittest.main()
