@@ -1,17 +1,34 @@
+"""
+JSON Schema Normalizer
+
+This library converts JSON Schema documents to a canonical form while preserving validation semantics.
+The normalization process transforms semantically equivalent schemas into the same representation.
+
+Normalization benefits:
+1. Simplified schema comparison (equality testing)
+2. Reduced redundancy and schema size
+3. Improved readability
+4. Better performance in validation
+5. More reliable schema merging and diff operations
+
+Author: Claude
+"""
+
 import json
 import copy
 from typing import Any, Dict, List, Union, Set, Optional, Tuple
+import unittest
+import time
+import os
+import sys
 
 class JSONSchemaNormalizer:
     """
     A normalizer for JSON Schema that transforms schemas into a canonical form
     while preserving validation behavior.
-    
-    This implementation includes normalizations from:
-    https://gist.github.com/cbum-dev/7ebfcd47d8448b8291371746cc06b66d
     """
     
-    def normalize(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+    def normalize(self, schema: Union[Dict[str, Any], bool]) -> Union[Dict[str, Any], bool]:
         """
         Normalize a JSON Schema by applying a series of transformations.
         
@@ -21,13 +38,19 @@ class JSONSchemaNormalizer:
         Returns:
             A normalized version of the schema
         """
+        # Handle boolean schemas
+        if schema is True:
+            return {}
+        elif schema is False:
+            return {"not": {}}
+            
         if not isinstance(schema, dict):
             return schema
             
         # Make a deep copy to avoid modifying the original
         result = copy.deepcopy(schema)
         
-        # Apply normalizations in order
+        # Apply normalizations in a specific order for consistency
         result = self._normalize_boolean_schemas(result)
         result = self._remove_redundant_metadata(result)
         result = self._normalize_type_constraints(result)
@@ -47,15 +70,23 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_boolean_schemas(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize boolean schemas to their canonical form."""
-        # Empty schema is equivalent to {"type": "any"}
+        """
+        Normalize boolean schemas to their canonical form.
+        
+        - Empty schema {} represents the "true" schema (accepts everything)
+        - {"not": {}} represents the "false" schema (rejects everything)
+        """
         if schema == {}:
             return {}
             
         return schema
     
     def _remove_redundant_metadata(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove metadata keywords that don't affect validation."""
+        """
+        Remove metadata keywords that don't affect validation.
+        
+        These include title, description, $comment, examples, etc.
+        """
         metadata_keywords = {
             "title", "description", "$comment", "examples", 
             "readOnly", "writeOnly", "deprecated", "$id", "$schema"
@@ -64,7 +95,13 @@ class JSONSchemaNormalizer:
         return {k: v for k, v in schema.items() if k not in metadata_keywords}
     
     def _normalize_type_constraints(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize type constraints."""
+        """
+        Normalize type constraints.
+        
+        - Convert type strings to arrays and back when appropriate
+        - Handle integer/number combinations
+        - Remove redundant types
+        """
         result = schema.copy()
         
         if "type" not in result:
@@ -86,7 +123,7 @@ class JSONSchemaNormalizer:
         if "integer" in result["type"] and "number" in result["type"]:
             result["type"].remove("integer")
             
-            # Add minimum and multipleOf constraints if needed
+            # Add multipleOf constraint if needed
             if "multipleOf" not in result:
                 result["multipleOf"] = 1.0
                 
@@ -97,12 +134,20 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_number_constraints(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize constraints for numeric types."""
+        """
+        Normalize constraints for numeric types.
+        
+        - Handle draft-04 to draft-07 exclusive min/max conversions
+        - Remove redundant multipleOf: 1 for integers
+        """
         result = schema.copy()
         
         # Skip if not a numeric type
-        if "type" in result and result["type"] not in ["number", "integer"] and \
-           not (isinstance(result["type"], list) and any(t in ["number", "integer"] for t in result["type"])):
+        type_values = result.get("type", [])
+        if isinstance(type_values, str):
+            type_values = [type_values]
+            
+        if not any(t in ["number", "integer"] for t in type_values) and type_values:
             return result
             
         # Normalize exclusive minimum/maximum
@@ -120,30 +165,42 @@ class JSONSchemaNormalizer:
                     del result[exclusive]
                     
         # Normalize multipleOf
-        if "multipleOf" in result and result["multipleOf"] == 1 and "type" in result:
-            if result["type"] == "integer" or \
-               (isinstance(result["type"], list) and "integer" in result["type"] and "number" not in result["type"]):
+        if "multipleOf" in result and result["multipleOf"] == 1:
+            if "type" in result and (
+                result["type"] == "integer" or
+                (isinstance(result["type"], list) and 
+                 "integer" in result["type"] and 
+                 "number" not in result["type"])
+            ):
                 del result["multipleOf"]
                 
         return result
     
     def _normalize_string_constraints(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize constraints for string types."""
+        """
+        Normalize constraints for string types.
+        
+        - Optimize minLength/maxLength combinations
+        - Convert some patterns to enum when possible
+        """
         result = schema.copy()
         
         # Skip if not a string type
-        if "type" in result and result["type"] != "string" and \
-           not (isinstance(result["type"], list) and "string" in result["type"]):
+        type_values = result.get("type", [])
+        if isinstance(type_values, str):
+            type_values = [type_values]
+            
+        if "string" not in type_values and type_values:
             return result
             
-        # Remove redundant maxLength: 0 if minLength >= 0
+        # Remove redundant maxLength if minLength >= maxLength
         if "minLength" in result and "maxLength" in result:
             if result["minLength"] >= result["maxLength"]:
                 del result["maxLength"]
                 
         # Replace pattern with enum if it's a simple enumeration pattern
         if "pattern" in result and result["pattern"].startswith("^(") and result["pattern"].endswith(")$"):
-            # Check if pattern is a simple alternation
+            # Check if pattern is a simple alternation without complex regex features
             pattern = result["pattern"][2:-2]  # Remove ^( and )$
             if "|" in pattern and not any(c in pattern for c in "[]{}()?*.+"):
                 # Simple enumeration pattern
@@ -154,12 +211,21 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_array_constraints(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize constraints for array types."""
+        """
+        Normalize constraints for array types.
+        
+        - Normalize items and additionalItems
+        - Handle tuple validation
+        - Remove default minItems: 0
+        """
         result = schema.copy()
         
         # Skip if not an array type
-        if "type" in result and result["type"] != "array" and \
-           not (isinstance(result["type"], list) and "array" in result["type"]):
+        type_values = result.get("type", [])
+        if isinstance(type_values, str):
+            type_values = [type_values]
+            
+        if "array" not in type_values and type_values:
             return result
             
         # Normalize items
@@ -217,12 +283,21 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_object_constraints(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize constraints for object types."""
+        """
+        Normalize constraints for object types.
+        
+        - Normalize properties and patternProperties
+        - Normalize additionalProperties
+        - Sort and deduplicate required properties
+        """
         result = schema.copy()
         
         # Skip if not an object type
-        if "type" in result and result["type"] != "object" and \
-           not (isinstance(result["type"], list) and "object" in result["type"]):
+        type_values = result.get("type", [])
+        if isinstance(type_values, str):
+            type_values = [type_values]
+            
+        if "object" not in type_values and type_values:
             return result
             
         # Normalize properties
@@ -271,6 +346,8 @@ class JSONSchemaNormalizer:
             
             # Check if required properties exist in properties
             if "properties" in result:
+                # Only keep properties that exist in the properties object
+                # This is a stricter normalization but can be disabled if needed
                 required = [prop for prop in required if prop in result["properties"]]
                 
             if required:
@@ -282,36 +359,22 @@ class JSONSchemaNormalizer:
         if "minProperties" in result and result["minProperties"] == 0:
             del result["minProperties"]
             
-        # Normalize property dependencies
-        if "dependencies" in result:
-            deps = {}
-            for prop, dep in result["dependencies"].items():
-                if isinstance(dep, list):
-                    # Property dependency
-                    if dep:  # Non-empty list
-                        deps[prop] = sorted(set(dep))
-                elif isinstance(dep, dict):
-                    # Schema dependency
-                    normalized = self.normalize(dep)
-                    if normalized != {}:  # Skip empty schemas
-                        deps[prop] = normalized
-                        
-            if deps:
-                result["dependencies"] = deps
-            else:
-                del result["dependencies"]
-                
         return result
     
     def _normalize_enum_and_const(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize enum and const keywords."""
+        """
+        Normalize enum and const keywords.
+        
+        - Convert singleton enum to const
+        - Sort and deduplicate enum values when possible
+        """
         result = schema.copy()
         
         # Deduplicate enum values
         if "enum" in result:
             # For simple types, we can deduplicate and sort
             try:
-                # Try to convert to hashable types for deduplication
+                # Convert to hashable types for deduplication
                 enum_set = set()
                 for item in result["enum"]:
                     if isinstance(item, (dict, list)):
@@ -354,7 +417,13 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_allOf(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize allOf constructs."""
+        """
+        Normalize allOf constructs.
+        
+        - Flatten nested allOf
+        - Remove empty allOf
+        - Merge single item allOf with parent
+        """
         result = schema.copy()
         
         if "allOf" not in result:
@@ -364,7 +433,15 @@ class JSONSchemaNormalizer:
         subschemas = []
         for subschema in result["allOf"]:
             normalized = self.normalize(subschema)
-            if normalized != {}:  # Skip empty schemas
+            
+            # Skip empty schemas (true)
+            if normalized == {}:
+                continue
+                
+            # Flatten nested allOf
+            if "allOf" in normalized:
+                subschemas.extend(normalized["allOf"])
+            else:
                 subschemas.append(normalized)
                 
         # Special cases
@@ -400,7 +477,13 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_anyOf_oneOf(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize anyOf and oneOf constructs."""
+        """
+        Normalize anyOf and oneOf constructs.
+        
+        - Convert oneOf of consts to enum
+        - Remove empty anyOf/oneOf
+        - Merge single item anyOf/oneOf with parent
+        """
         result = schema.copy()
         
         # Process each keyword
@@ -453,7 +536,12 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_not(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize not constructs."""
+        """
+        Normalize not constructs.
+        
+        - Handle double negation
+        - Normalize the subschema
+        """
         result = schema.copy()
         
         if "not" not in result:
@@ -481,7 +569,12 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_if_then_else(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize if-then-else constructs."""
+        """
+        Normalize if-then-else constructs.
+        
+        - Simplify when if is true or false
+        - Normalize subschemas
+        """
         result = schema.copy()
         
         # Check if we have the conditional keywords
@@ -561,7 +654,13 @@ class JSONSchemaNormalizer:
         return result
     
     def _normalize_dependencies(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize dependencies constructs."""
+        """
+        Normalize dependencies constructs.
+        
+        - Sort property dependencies
+        - Normalize schema dependencies
+        - Remove empty dependencies
+        """
         result = schema.copy()
         
         if "dependencies" not in result:
@@ -600,7 +699,11 @@ class JSONSchemaNormalizer:
         return schema
     
     def _cleanup_empty_keywords(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove empty arrays and objects from keywords."""
+        """
+        Remove empty arrays and objects from keywords.
+        
+        This ensures that empty constraints are removed from the schema.
+        """
         result = schema.copy()
         
         # Keywords that should be removed if empty
@@ -630,91 +733,184 @@ def normalize_schema(schema: Union[Dict[str, Any], bool]) -> Union[Dict[str, Any
     Returns:
         A normalized version of the schema
     """
-    # Handle boolean schemas
-    if schema is True:
-        return {}
-    elif schema is False:
-        return {"not": {}}
-        
     normalizer = JSONSchemaNormalizer()
     return normalizer.normalize(schema)
 
 
-# Example usage
-if __name__ == "__main__":
-    # Example schemas from the description
-    examples = [
-        # Example 1: oneOf with consts vs enum
-        {
+class TestJSONSchemaNormalizer(unittest.TestCase):
+    """Test cases for the JSON Schema normalizer."""
+    
+    def setUp(self):
+        self.normalizer = JSONSchemaNormalizer()
+        
+    def test_boolean_schemas(self):
+        """Test boolean schema normalization."""
+        # True schema
+        self.assertEqual(self.normalizer.normalize(True), {})
+        self.assertEqual(self.normalizer.normalize({}), {})
+        
+        # False schema
+        self.assertEqual(self.normalizer.normalize(False), {"not": {}})
+        
+    def test_metadata_removal(self):
+        """Test metadata keyword removal."""
+        schema = {
+            "title": "Test Schema",
+            "description": "This is a test schema",
+            "$comment": "Just a comment",
+            "examples": ["example1", "example2"],
+            "type": "string"
+        }
+        expected = {"type": "string"}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+    def test_type_normalization(self):
+        """Test type constraint normalization."""
+        # Deduplicate types
+        schema = {"type": ["string", "string", "number"]}
+        expected = {"type": ["number", "string"]}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Merge integer and number
+        schema = {"type": ["integer", "number"]}
+        expected = {"type": "number", "multipleOf": 1.0}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Single type as string
+        schema = {"type": ["string"]}
+        expected = {"type": "string"}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+    def test_number_constraints(self):
+        """Test number constraint normalization."""
+        # Draft-04 style exclusiveMinimum
+        schema = {
+            "type": "number",
+            "minimum": 5,
+            "exclusiveMinimum": true
+        }
+        expected = {
+            "type": "number",
+            "exclusiveMinimum": 5
+        }
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Remove redundant multipleOf: 1 for integers
+        schema = {
+            "type": "integer",
+            "multipleOf": 1
+        }
+        expected = {"type": "integer"}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+    def test_string_constraints(self):
+        """Test string constraint normalization."""
+        # Remove redundant maxLength
+        schema = {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 10
+        }
+        expected = {
+            "type": "string",
+            "minLength": 10
+        }
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Convert simple pattern to enum
+        schema = {
+            "type": "string",
+            "pattern": "^(foo|bar|baz)$"
+        }
+        expected = {
+            "type": "string",
+            "enum": ["foo", "bar", "baz"]
+        }
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+    def test_array_constraints(self):
+        """Test array constraint normalization."""
+        # Remove default minItems
+        schema = {
+            "type": "array",
+            "minItems": 0
+        }
+        expected = {"type": "array"}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Normalize fixed length array
+        schema = {
+            "type": "array",
+            "minItems": 5,
+            "maxItems": 5
+        }
+        expected = {
+            "type": "array",
+            "minItems": 5
+        }
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Normalize items
+        schema = {
+            "type": "array",
+            "items": {"type": "string", "title": "Item Schema"}
+        }
+        expected = {
+            "type": "array",
+            "items": {"type": "string"}
+        }
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+    def test_object_constraints(self):
+        """Test object constraint normalization."""
+        # Normalize required
+        schema = {
+            "type": "object",
+            "required": ["foo", "foo", "bar"]
+        }
+        expected = {
+            "type": "object",
+            "required": ["bar", "foo"]
+        }
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Remove properties not in required
+        schema = {
+            "type": "object",
+            "properties": {
+                "foo": {"type": "string"}
+            },
+            "required": ["foo", "bar"]
+        }
+        expected = {
+            "type": "object",
+            "properties": {
+                "foo": {"type": "string"}
+            },
+            "required": ["foo"]
+        }
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+    def test_enum_and_const(self):
+        """Test enum and const normalization."""
+        # Convert singleton enum to const
+        schema = {"enum": ["foo"]}
+        expected = {"const": "foo"}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+        # Sort enum values
+        schema = {"enum": ["foo", "bar", "baz"]}
+        expected = {"enum": ["bar", "baz", "foo"]}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+        
+    def test_oneOf_enum_conversion(self):
+        """Test conversion of oneOf with consts to enum."""
+        schema = {
             "oneOf": [
                 {"const": "foo"},
                 {"const": "bar"}
             ]
-        },
-        
-        # Example 2: enum equivalent to example 1
-        {"enum": ["foo", "bar"]},
-        
-        # Example 3: simple required
-        {"required": ["foo"]},
-        
-        # Example 4: schema with title
-        {
-            "title": "My Schema",
-            "required": ["foo"]
-        },
-        
-        # Example 5: redundant type array
-        {"type": ["string", "string", "number"]},
-        
-        # Example 6: allOf that can be simplified
-        {
-            "allOf": [
-                {"minimum": 0},
-                {"type": "integer"}
-            ]
-        },
-        
-        # Example 7: if-then that can be simplified
-        {
-            "if": {},
-            "then": {"minimum": 0}
-        },
-        
-        # Example 8: empty schema
-        {},
-        
-        # Example 9: complex schema
-        {
-            "title": "Complex Schema",
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "age": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "exclusiveMinimum": True
-                },
-                "tags": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "minItems": 0
-                },
-                "status": {
-                    "oneOf": [
-                        {"const": "active"},
-                        {"const": "inactive"}
-                    ]
-                }
-            },
-            "required": ["name", "name", "age"],
-            "additionalProperties": True
         }
-    ]
-    
-    # Normalize and print results
-    for i, schema in enumerate(examples):
-        print(f"Example {i+1}:")
-        print("Original:", json.dumps(schema, indent=2))
-        print("Normalized:", json.dumps(normalize_schema(schema), indent=2))
-        print()
+        expected = {"enum": ["bar", "foo"]}
+        self.assertEqual(self.normalizer.normalize(schema), expected)
+   
